@@ -1,0 +1,1777 @@
+
+---
+title: "AMEX"
+output: pdf_document
+date: "2022-12-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggfittext)
+library(cowplot)
+library(patchwork)
+library(tidymodels)
+library(xgboost)
+library(data.table)
+library(caret)
+getwd()
+```
+
+
+
+Proyecto AMEX
+
+Lectura de los datos
+
+```{r}
+data_ligth <- read.csv("Data/train_data.csv", nrows = 100000, header = TRUE)
+```
+
+Preprocesmiento
+
+
+```{r}
+all_cols <- names(data_ligth)
+all_cols_df <- as.data.frame(all_cols)
+all_cols_df <- all_cols_df %>% mutate(type="numeric")
+all_cols_df <- all_cols_df %>% mutate(type=if_else(all_cols %in% c("customer_ID", "S_2","D_63","D_64"),"character","numeric"))
+type1 <- c(all_cols_df$type)
+
+```
+
+Data set completo
+
+```{r}
+
+train_df <- read.csv("Data/train_data.csv", header = TRUE, colClasses = type1)
+
+```
+
+
+Liberar espacio
+
+```{r}
+rm(data_ligth)
+```
+
+Lectura de etiquetas de entrenamiento
+
+```{r}
+
+train_labels <- read.csv("Data/train_labels.csv")
+
+```
+
+
+Pegado de etiquetas al set de entrenamiento
+
+```{r}
+train_df <- left_join(train_df, train_labels, by = c("customer_ID"))
+
+```
+
+Rango de fechas del set de entrenamiento
+
+```{r}
+fechas <- train_df %>% mutate(Fechas = as.Date(S_2)) %>% select(Fechas) %>% distinct() %>% arrange(Fechas)
+rbind(head(fechas,1), tail(fechas,1))
+
+```
+
+
+
+Gráfico de distribución de etiquetas
+
+```{r}
+train_df <- train_df %>% mutate(target_l = if_else(target==1,"Default","No-Default"))
+train_df %>% mutate(Client = "Proporcion") %>% 
+  ggplot(aes(x=Client, fill=target_l)) + geom_bar(position = "fill") + 
+  scale_y_continuous(labels = scales::percent) + theme_bw() + ylab("") + xlab("") +  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Distribución de variable target") +  guides(fill=guide_legend(title="Target"))
+
+```
+
+
+Valores en NA
+
+```{r}
+na_prop <- (colMeans(is.na(train_df)))*100
+na_prop_df <- as.data.frame(na_prop)
+na_prop_df <- na_prop_df %>% tibble::rownames_to_column()
+na_prop_df <- na_prop_df %>% filter(rowname != "customer_ID")
+
+na_prop_df %>% filter(na_prop>90) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop>80 & na_prop<=90) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop>70 & na_prop<=80) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop>60 & na_prop<=70) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop>50 & na_prop<=60) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop>40 & na_prop<=50) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop>30 & na_prop<=40) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop>20 & na_prop<=30) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop>10 & na_prop<=20) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop<=10) %>%arrange(desc(na_prop))
+na_prop_df %>% filter(na_prop == 0) %>%arrange(desc(na_prop))
+
+```
+
+
+Tenemos 18 variables con valores NA mayor a 90%. Por cuestions practicas para este modelo habremos de descartar este gupo de variables
+
+
+### Variables Delinquency
+
+Estas variables hacen referencia a variables de morosidad de las cuales 9 de ellas hacen referencia a variables categoricas que son: 'D_114', 'D_116', 'D_117', 'D_120', 'D_126', 'D_63', 'D_64', 'D_66', 'D_68'.
+
+El resto de variables son:
+
+```{r}
+VarName <- colnames(train_df) 
+names <- as.data.frame(VarName)
+names_1 <- names %>% mutate(Clave = substr(VarName,1,1)) %>% filter(Clave == 'D') %>% select(VarName)
+names_2 <- names_1 %>% filter(!(VarName %in% c('D_114', 'D_116', 'D_117', 'D_120', 'D_126', 'D_63', 'D_64', 'D_66', 'D_68')))
+names_2
+```
+
+Graficos de variables continuas.
+
+Calculo de la variable Per que es el año + el número de mes para poder hacer la gráficas
+
+```{r}
+
+train_df <- train_df %>% mutate(Mes = as.double(substr(S_2,6,7)), Anio = as.double(substr(S_2,1,4)))
+train_df <- train_df %>% mutate(Mes1 = if_else(Mes<10, paste0("0",Mes), as.character(Mes))) 
+train_df$Per <- paste0(train_df$Anio, train_df$Mes1)
+train_df <- train_df %>% mutate(Per = as.double(Per))
+train_df %>% select(Per) %>% distinct()
+```
+
+
+
+
+Graficos
+
+```{r}
+#Agrupamos datos para graficas medias
+
+d_39 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_39, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 39") + labs(colour = "Target")
+
+d_41 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_41, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 41") + labs(colour = "Target")
+
+d_42 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_42, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 42") + labs(colour = "Target")
+
+d_43 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_43, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 43") + labs(colour = "Target")
+
+d_44 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_44, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 44") + labs(colour = "Target")
+
+d_45 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_45, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 45") + labs(colour = "Target")
+
+d_46 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_46, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 46") + labs(colour = "Target")
+
+d_47 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_47, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 47") + labs(colour = "Target")
+
+d_48 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_48, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 48") + labs(colour = "Target")
+
+d_49 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_49, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 49") + labs(colour = "Target")
+
+d_50 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_50, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 50") + labs(colour = "Target")
+
+d_51 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_51, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 51") + labs(colour = "Target")
+
+d_52 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_52, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 52") + labs(colour = "Target")
+
+d_53 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_53, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 53") + labs(colour = "Target")
+
+d_54 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_54, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 54") + labs(colour = "Target")
+
+d_55 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_55, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 55") + labs(colour = "Target")
+
+d_56 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_56, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 56") + labs(colour = "Target")
+
+d_58 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_58, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 58") + labs(colour = "Target")
+
+d_59 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_59, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 59") + labs(colour = "Target")
+
+d_60 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_60, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 60") + labs(colour = "Target")
+
+d_61 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_61, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 61") + labs(colour = "Target")
+
+d_62 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_62, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 62") + labs(colour = "Target")
+
+d_65 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_65, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 65") + labs(colour = "Target")
+
+d_69 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_69, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 69") + labs(colour = "Target")
+
+d_70 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_70, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 70") + labs(colour = "Target")
+
+d_71 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_71, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 71") + labs(colour = "Target")
+
+d_72 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_72, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 72") + labs(colour = "Target")
+
+d_73 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_73, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 73") + labs(colour = "Target")
+
+d_74 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_74, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 74") + labs(colour = "Target")
+
+d_75 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_75, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 75") + labs(colour = "Target")
+
+d_76 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_76, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 76") + labs(colour = "Target")
+
+d_77 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_77, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 77") + labs(colour = "Target")
+
+d_78 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_78, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 78") + labs(colour = "Target")
+
+d_79 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_79, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 79") + labs(colour = "Target")
+
+d_80 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_80, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 80") + labs(colour = "Target")
+
+d_81 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_81, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 81") + labs(colour = "Target")
+
+d_82 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_82, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 82") + labs(colour = "Target")
+
+d_83 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_83, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 83") + labs(colour = "Target")
+
+d_84 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_84, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 84") + labs(colour = "Target")
+
+d_86 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_86, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 86") + labs(colour = "Target")
+
+d_87 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_87, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 87") + labs(colour = "Target")
+
+d_88 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_88, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 88") + labs(colour = "Target")
+
+d_89 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_89, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 89") + labs(colour = "Target")
+
+d_91 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_91, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 91") + labs(colour = "Target")
+
+d_92 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_92, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 92") + labs(colour = "Target")
+
+d_93 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_93, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 93") + labs(colour = "Target")
+
+d_94 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_94, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 94") + labs(colour = "Target")
+
+d_96 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_96, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 96") + labs(colour = "Target")
+
+d_102 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_102, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 102") + labs(colour = "Target")
+
+d_103 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_103, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 103") + labs(colour = "Target")
+
+d_104 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_104, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 104") + labs(colour = "Target")
+
+d_105 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_105, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 105") + labs(colour = "Target")
+
+d_106 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_106, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 106") + labs(colour = "Target")
+
+d_107 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_107, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 107") + labs(colour = "Target")
+
+d_108 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_108, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 108") + labs(colour = "Target")
+
+d_109 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_109, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 109") + labs(colour = "Target")
+
+d_110 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_110, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 110") + labs(colour = "Target")
+
+d_111 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_111, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 111") + labs(colour = "Target")
+
+d_112 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_112, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 112") + labs(colour = "Target")
+
+d_113 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_113, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 113") + labs(colour = "Target")
+
+d_115 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_115, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 115") + labs(colour = "Target")
+
+d_118 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_118, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 118") + labs(colour = "Target")
+
+d_119 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_119, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 119") + labs(colour = "Target")
+
+d_121 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_121, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 121") + labs(colour = "Target")
+
+d_122 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_122, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 122") + labs(colour = "Target")
+
+d_123 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_123, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 123") + labs(colour = "Target")
+
+d_124 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_124, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 124") + labs(colour = "Target")
+
+d_125 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_125, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 125") + labs(colour = "Target")
+
+d_127 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_127, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 127") + labs(colour = "Target")
+
+d_128 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_128, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 128") + labs(colour = "Target")
+
+d_129 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_129, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 129") + labs(colour = "Target")
+
+d_130 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_130, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 130") + labs(colour = "Target")
+
+d_131 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_131, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 131") + labs(colour = "Target")
+
+d_132 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_132, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 132") + labs(colour = "Target")
+
+d_133 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_133, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 133") + labs(colour = "Target")
+
+d_134 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_134, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 134") + labs(colour = "Target")
+
+d_135 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_135, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 135") + labs(colour = "Target")
+
+d_136 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_136, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 136") + labs(colour = "Target")
+
+d_137 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_137, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 137") + labs(colour = "Target")
+
+d_138 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_138, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 138") + labs(colour = "Target")
+
+d_139 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_139, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 139") + labs(colour = "Target")
+
+d_140 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_140, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 140") + labs(colour = "Target")
+
+d_141 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_141, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 141") + labs(colour = "Target")
+
+d_142 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_142, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 142") + labs(colour = "Target")
+
+d_143 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_143, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 143") + labs(colour = "Target")
+
+d_144 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_144, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 144") + labs(colour = "Target")
+
+d_145 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(D_145, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("D 145") + labs(colour = "Target")
+
+
+
+d_50+d_51+d_52+d_53+d_54+d_55+d_56+d_58+d_59+d_60+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+d_61+d_62+d_65+d_69+d_70+d_71+d_72+d_73+d_74+d_75+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+d_76+d_77+d_78+d_79+d_80+d_81+d_82+d_83+d_84+d_86+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom') 
+d_87+d_88+d_89+d_91+d_92+d_93+d_94+d_96+d_102+d_103+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+d_104+d_105+d_106+d_107+d_108+d_109+d_110+d_111+d_112+d_113+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+d_115+d_118+d_119+d_121+d_122+d_123+d_124+d_125+d_127+d_128+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+d_129+d_130+d_131+d_132+d_133+d_134+d_135+d_136+d_137+d_138+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+d_139+d_140+d_141+d_142+d_143+d_144+d_145 + plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+
+
+
+
+```
+
+
+
+Como se puede obserrvar en las gráficas, el comportamiento promedio del último mes del año en que se registra una transacción es muy distinto entre los clientes que caen en dafulty los que no. Aunque en realidad, durante todo el año el comportamiento de las vriables que hacen referencia a morosidad es muy distinto en promedio, pero llama la atención el último periodo. 
+
+
+### Variables categoricas
+
+Para ver el comportamiento de las variables categoricas respecto de la variable target, también revisaremos por periodo el comportamiento de las mismas para entender si alguna de estás variabes cambia con el tiempo entre las personas que caen en default y no. 
+
+```{r}
+
+b_30 <- train_df %>% mutate(B_30 = as.factor(B_30), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=B_30)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+b_38 <- train_df %>% mutate(B_38 = as.factor(B_38), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=B_38)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_63 <- train_df %>% mutate(Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_63)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_64 <- train_df %>% mutate(Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_64)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_66 <- train_df %>% mutate(D_66 = as.factor(D_66), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_66)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_68 <- train_df %>% mutate(D_68 = as.factor(D_68), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_68)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_114 <- train_df %>% mutate(D_114 = as.factor(D_114), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_114)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_116 <- train_df %>% mutate(D_116 = as.factor(D_116), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_116)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_117 <- train_df %>% mutate(D_117 = as.factor(D_117), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_117)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_120 <- train_df %>% mutate(D_120 = as.factor(D_120), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_120)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+d_126 <- train_df %>% mutate(D_126 = as.factor(D_126), Per = as.factor(Per)) %>% ggplot(aes(x=Per, fill=D_126)) + 
+  geom_bar(position = "fill") + scale_y_continuous(labels = scales::percent) +
+  facet_wrap(~target_l) + theme_bw()
+
+
+b_30 + b_38 + plot_layout(ncol = 1)
+d_63 + d_64 + plot_layout(ncol = 1)
+d_66 + d_68 + plot_layout(ncol = 1)
+d_114 + d_116 + plot_layout(ncol = 1)
+d_117 + d_120 + plot_layout(ncol = 1)
+d_126
+
+
+```
+
+
+
+Las gráficas para cada variable categorica muestran un comportamiento muy similar en todos los periodos y sin lugar a dudas existen variables que distinguen muy bien entre los clientes que caen en defualt y los que no. Sólo D_66 y D_116 consideramos que son no informativas, pues practicamente todos los clientes tienen una sola categoría. 
+
+
+El análisis anterior, sugiere que para armar el data set final para el modelo tenemos dos alternativas, la primera es gregar los datos considerando toda la historia, tomando promedios para las variables numéricas y quedarse con la clase del último mes en el caso de variables catgoricas, pues coo se observa en los graficos, la distribucion de proporciones se mantiene y además el último mes es muy informativo al momento de distinguir de manera perfecta el último mes. 
+
+La otra opción, será simplemente tomar la información del último mes, porque como hemos visto a lo largo del análisis, en muchas de las variables el último periodo tiene un comportamiento muy marcado entre los clientes que caen en default y los que no. Para fines de este análisis tomaremos ambas opciones y veremos cómo se desempeña en cada caso. 
+
+
+### Variables de balance
+
+Dentro de las variables de balance tenemos dos categoricas que son: B_30 y B_38
+
+```{r}
+
+names_1 <- names %>% mutate(Clave = substr(VarName,1,1)) %>% filter(Clave == 'B') %>% select(VarName)
+names_2 <- names_1 %>% filter(!(VarName %in% c('B_30','B_38')))
+names_2
+
+```
+
+```{r}
+
+B_1 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_1, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 1") + labs(colour = "Target")
+
+B_2 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_2, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 2") + labs(colour = "Target")
+
+B_3 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_3, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 3") + labs(colour = "Target")
+
+B_4 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_4, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 4") + labs(colour = "Target")
+
+B_5 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_5, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 5") + labs(colour = "Target")
+
+B_6 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_6, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 6") + labs(colour = "Target")
+
+B_7 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_7, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 7") + labs(colour = "Target")
+
+B_8 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_8, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 8") + labs(colour = "Target")
+
+B_9 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_9, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 9") + labs(colour = "Target")
+
+B_10 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_10, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 10") + labs(colour = "Target")
+
+B_11 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_11, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 11") + labs(colour = "Target")
+
+B_12 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_12, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 12") + labs(colour = "Target")
+
+B_13 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_13, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 13") + labs(colour = "Target")
+
+B_14 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_14, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 14") + labs(colour = "Target")
+
+B_15 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_15, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 15") + labs(colour = "Target")
+
+B_16 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_16, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 16") + labs(colour = "Target")
+
+B_17 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_17, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 17") + labs(colour = "Target")
+
+B_18 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_18, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 18") + labs(colour = "Target")
+
+B_19 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_19, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 19") + labs(colour = "Target")
+
+B_20 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_20, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 20") + labs(colour = "Target")
+
+B_21 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_21, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 21") + labs(colour = "Target")
+
+B_22 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_22, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 22") + labs(colour = "Target")
+
+B_23 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_23, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 23") + labs(colour = "Target")
+
+B_24 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_24, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 24") + labs(colour = "Target")
+
+B_25 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_25, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 25") + labs(colour = "Target")
+
+B_26 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_26, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 26") + labs(colour = "Target")
+
+B_27 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_27, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 27") + labs(colour = "Target")
+
+B_28 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_28, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 28") + labs(colour = "Target")
+
+B_29 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_29, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 29") + labs(colour = "Target")
+
+B_31 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_31, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 31") + labs(colour = "Target")
+
+B_32 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_32, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 32") + labs(colour = "Target")
+
+B_33 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_33, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 33") + labs(colour = "Target")
+
+B_36 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_36, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 36") + labs(colour = "Target")
+
+B_37 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_37, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 37") + labs(colour = "Target")
+
+B_39 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_39, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 39") + labs(colour = "Target")
+
+B_40 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_40, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 40") + labs(colour = "Target")
+
+B_41 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_41, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 41") + labs(colour = "Target")
+
+B_42 <- train_df %>% group_by(Per, target_l) %>% summarise(B_avg = mean(B_42, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=B_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("B 42") + labs(colour = "Target")
+
+
+B_1+B_2+B_3+B_4+B_5+B_6+B_7+B_8+B_9+B_10+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+B_11+B_12+B_13+B_14+B_15+B_16+B_17+B_18+B_19+B_20+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+B_21+B_22+B_23+B_24+B_25+B_26+B_27+B_28+B_29+B_31+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+B_32+B_33+B_36+B_37+B_39+B_40+B_41+B_42+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+
+
+
+names_2$VarName
+
+```
+
+
+Al igual que las variables de morosidad, los promedios a lo largo del tiempo muestran una segmentación clara entre los clientes que caen en default y los que no.
+
+
+### Variables de riesgo
+
+
+```{r}
+
+names_1 <- names %>% mutate(Clave = substr(VarName,1,1)) %>% filter(Clave == 'R') %>% select(VarName)
+names_2 <- names_1 
+names_2
+
+```
+
+
+```{r}
+
+R_1 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_1, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 1") + labs(colour = "Target")
+
+R_2 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_2, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 2") + labs(colour = "Target")
+
+R_3 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_3, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 3") + labs(colour = "Target")
+
+R_4 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_4, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 4") + labs(colour = "Target")
+
+R_5 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_5, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 5") + labs(colour = "Target")
+
+R_6 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_6, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 6") + labs(colour = "Target")
+
+R_7 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_7, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 7") + labs(colour = "Target")
+
+R_8 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_8, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 8") + labs(colour = "Target")
+
+R_9 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_9, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 9") + labs(colour = "Target")
+
+R_10 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_10, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 10") + labs(colour = "Target")
+
+R_11 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_11, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 11") + labs(colour = "Target")
+
+R_12 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_12, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 12") + labs(colour = "Target")
+
+R_13 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_13, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 13") + labs(colour = "Target")
+
+R_14 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_14, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 14") + labs(colour = "Target")
+
+R_15 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_15, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 15") + labs(colour = "Target")
+
+R_16 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_16, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 16") + labs(colour = "Target")
+
+R_17 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_17, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 17") + labs(colour = "Target")
+
+R_18 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_18, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 18") + labs(colour = "Target")
+
+R_19 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_19, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 19") + labs(colour = "Target")
+
+R_20 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_20, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 20") + labs(colour = "Target")
+
+R_21 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_21, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 21") + labs(colour = "Target")
+
+R_22 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_22, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 22") + labs(colour = "Target")
+
+R_23 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_23, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 23") + labs(colour = "Target")
+
+R_24 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_24, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 24") + labs(colour = "Target")
+
+R_25 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_25, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 25") + labs(colour = "Target")
+
+R_26 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_26, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 26") + labs(colour = "Target")
+
+R_27 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_27, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 27") + labs(colour = "Target")
+
+R_28 <- train_df %>% group_by(Per, target_l) %>% summarise(R_avg = mean(R_28, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=R_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("R 28") + labs(colour = "Target")
+
+
+B_1+B_2+B_3+B_4+B_5+B_6+B_7+B_8+B_9+B_10+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+
+R_1+R_2+R_3+R_4+R_5+R_6+R_7+R_8+R_9+R_10+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+R_11+R_12+R_13+R_14+R_15+R_16+R_17+R_18+R_19 + R_20 + plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+R_21+R_22+R_23+R_24+R_25+R_26+R_27+R_28+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+
+
+names_2$VarName
+```
+
+
+
+
+
+
+
+
+### Variables de gasto
+
+
+```{r}
+names_1 <- names %>% mutate(Clave = substr(VarName,1,1)) %>% filter(Clave == 'S') %>% select(VarName)
+names_2 <- names_1
+names_2
+```
+
+
+
+```{r}
+
+S_3 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_3, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 3") + labs(colour = "Target")
+
+S_5 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_5, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 5") + labs(colour = "Target")
+
+S_6 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_6, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 6") + labs(colour = "Target")
+
+S_7 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_7, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 7") + labs(colour = "Target")
+
+
+S_8 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_8, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 8") + labs(colour = "Target")
+
+
+S_9 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_9, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 9") + labs(colour = "Target")
+
+
+S_11 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_11, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 11") + labs(colour = "Target")
+
+
+S_12 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_12, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 12") + labs(colour = "Target")
+
+
+S_13 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_13, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 13") + labs(colour = "Target")
+
+
+S_15 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_15, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 15") + labs(colour = "Target")
+
+
+S_16 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_16, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 16") + labs(colour = "Target")
+
+
+S_17 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_17, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 17") + labs(colour = "Target")
+
+
+S_18 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_18, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 18") + labs(colour = "Target")
+
+
+S_19 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_19, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 19") + labs(colour = "Target")
+
+
+S_20 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_20, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 20") + labs(colour = "Target")
+
+
+S_22 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_22, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 22") + labs(colour = "Target")
+
+
+S_23 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_23, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 23") + labs(colour = "Target")
+
+
+S_24 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_24, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 24") + labs(colour = "Target")
+
+
+S_25 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_25, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 25") + labs(colour = "Target")
+
+
+S_26 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_26, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 26") + labs(colour = "Target")
+
+
+S_27 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(S_27, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("S 27") + labs(colour = "Target")
+
+
+
+
+S_5+S_6+S_7+S_8+S_9+S_11+S_12+S_13+S_15+S_16+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+
+S_17+S_18+S_19+S_20+S_22+S_23+S_24+S_25+S_26+S_27+plot_layout(ncol = 5, guides = 'collect') & theme(legend.position='bottom')
+
+```
+
+
+### Variables de pago
+
+
+```{r}
+names_1 <- names %>% mutate(Clave = substr(VarName,1,1)) %>% filter(Clave == 'P') %>% select(VarName)
+names_2 <- names_1
+names_2
+
+
+```
+
+
+```{r}
+P_4 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(P_4, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("P 4") + labs(colour = "Target")
+
+
+P_3 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(P_3, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("P 3") + labs(colour = "Target")
+
+
+P_2 <- train_df %>% group_by(Per, target_l) %>% summarise(D_avg = mean(P_2, na.rm=TRUE)) %>% 
+  ggplot(aes(x=Per, y=D_avg, color=target_l)) + geom_line() + ylab("Mean") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) + ggtitle("P 2") + labs(colour = "Target")
+
+
+P_2+P_3+P_4+plot_layout(ncol = 2, guides = 'collect') & theme(legend.position='bottom')
+
+
+
+```
+
+
+
+
+
+### Armado de la base de datos
+
+**Opción 1**
+
+Previo al armado, debemos de considerar ciertas cosas, por ejemplo algunas variables categoricas tienen valores en blanco. También consideraremos el valor de NA como otra clase, siempre que aplique, ya que recordemos que sólo vamos a conservar el valor del último mes por lo que se justificó en el análsisi exploratorio. Finalmente, agruparemos por pormedios, pero es importante decir que aquellos valores que se mantengan en NA se quedarán de esa manera y aplicaremos un modlo que no ayude a lidiar con esta parte. 
+
+
+Data agrupada
+
+```{r}
+#Se quitan variables numéricas y adicional las que tienen arriba del 90% de valores en NA
+
+train_numerico <- train_df %>% select(-S_2, -B_30, -B_38, -D_114, -D_116, -D_117, -D_120, -D_126, -D_63, -D_64, -D_66, -D_68,
+                                      -D_136, -D_137,-D_138,-R_9,-B_29,-D_106,-D_132,-D_49, D_87,
+                                      -D_88, -D_108, -D_110, -D_111, -B_39, -D_73, -B_42, -D_134, -D_135, -Per, -target, -target_l,
+                                      -Mes, -Anio, -Mes1) 
+
+
+test <- train_numerico %>% select(customer_ID, P_2, D_76)
+
+train_numerico1 <- train_numerico %>% group_by(customer_ID) %>% summarise(across(P_2:D_145, ~mean(.x, na.rm=TRUE)))
+
+#Eliminamos las dos variables categoricas en las que todos los clientes tenían una sola categoria
+
+train_categorico <- train_df %>% select(customer_ID, Per, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+  filter(Per == 201803) %>% select(-Per)
+
+rm(train_numerico)
+
+train_numerico2 <- left_join(train_numerico1, train_categorico, by = c("customer_ID"))
+write.csv(train_numerico2, "Data/train_agrupado.csv", row.names = FALSE)
+
+```
+
+
+Data sólo último periodo
+
+```{r}
+
+train_numerico_last <- train_df %>% filter(Per==201803)
+
+train_numerico_last <- train_numerico_last %>%  
+  select(-S_2, -B_30, -B_38, -D_114, -D_116, -D_117, -D_120, -D_126, -D_63, -D_64, -D_66, -D_68,
+                                      -D_136, -D_137,-D_138,-R_9,-B_29,-D_106,-D_132,-D_49, D_87,
+                                      -D_88, -D_108, -D_110, -D_111, -B_39, -D_73, -B_42, -D_134, -D_135, -Per, -target, -target_l,
+                                      -Mes, -Anio, -Mes1)  
+
+
+
+train_numerico_last1 <- left_join(train_numerico_last, train_categorico, by = c("customer_ID"))
+write.csv(train_numerico_last1, "Data/train_ultimo_per.csv", row.names = FALSE)
+
+
+```
+
+
+
+
+
+```{r}
+train_df %>% filter(Per == 201803) %>% dim()
+```
+
+
+
+
+### Modelo
+
+```{r}
+
+library(xgboost)
+library(caret)
+
+```
+
+
+Datos
+
+```{r}
+
+train_df_ind <- read.csv("Data/train_agrupado.csv")
+
+```
+
+
+Etiquetas
+
+```{r}
+
+train_label <- read.csv("Data/train_labels.csv")
+
+```
+
+
+Cruce etiquetas
+
+```{r}
+
+train_df_ind <- left_join(train_df_ind, train_label, by = c("customer_ID"))
+
+```
+
+
+Modelo
+
+```{r}
+#Example
+
+train_df_ind <- train_df_ind %>% mutate(B_30 = as.character(B_30),
+                                        B_38 = as.character(B_38), 
+                                        D_114 = as.character(D_114),
+                                        D_117 = as.character(D_117),
+                                        D_120 = as.character(D_120),
+                                        D_126 = as.character(D_126),
+                                        D_63 = as.character(D_63),
+                                        D_64 = as.character(D_64), 
+                                        D_68 = as.character(D_68))
+
+```
+
+
+```{r}
+recipe_train <- recipe(target ~ ., data=train_df_ind) %>%
+  step_dummy(B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68)
+
+
+train_df_m <- recipe_train %>% prep() %>% juice()
+train_df_m <- as.data.frame(train_df_m)
+
+```
+
+
+
+```{r}
+
+parts = createDataPartition(train_df_m$target, p = .8, list = F)
+train = train_df_m[parts, ]
+test = train_df_m[-parts, ]
+
+train1 <- train %>% select(-customer_ID)
+test1 <- test %>% select(-customer_ID)
+
+#train1 <- train %>% select(-target)
+#glimpse(train)
+#train %>% select(161)
+
+train_x = data.matrix(train1[, -161])
+train_y = train1[,161]
+#dim(train_y)
+
+#rev <- train[, -161]
+
+test_x = data.matrix(test1[, -161])
+test_y = test1[, 161]
+
+
+xgb_train = xgb.DMatrix(data = train_x, label = train_y)
+xgb_test = xgb.DMatrix(data = test_x, label = test_y)
+
+
+watchlist = list(train=xgb_train, test=xgb_test)
+
+num_vars <- dim(train_df_m)[2]
+
+param <- list(objective = "binary:logistic", eval_metric = "logloss", eta=0.5, colsample_bynode = 10/num_vars)
+
+model = xgb.train(param, data = xgb_train, max.depth = 4, watchlist=watchlist, nrounds = 2000)
+
+
+
+```
+
+
+```{r}
+mod_boost_cv <- xgb.cv(params = params, 
+                     data = d_entrena,
+                     nfold = 10, 
+                     nrounds = nrounds, # número de árboles
+                     print_every_n = every_n, 
+                     nthread = 4, # modificar según recursos
+                     verbose = verbose, metrics = c("mape"))
+
+
+num_vars <- dim(train_df_m)[2]
+params <- list(
+    objective = "binary:logistic",
+    eta = 0.01, # tamaño de paso
+    max_depth = 4,
+    colsample_bynode = 10/num_vars)
+
+
+mod_boost_cv <- xgb.cv(params = params, 
+                     data = xgb_train,
+                     nfold = 10, 
+                     nrounds = 1000, # número de árboles
+                     print_every_n = 1, metrics = c("logloss"))
+
+
+
+print(mod_boost_cv, verbose=TRUE)
+
+
+
+
+
+transformar_eval <- function(mod_boost_cv){
+    eval_tbl <- mod_boost_cv$evaluation_log |> 
+        pivot_longer(cols = -c(iter), names_to = "variable", values_to = "valor") |> 
+        separate(variable, into = c("tipo", "metrica", "res")) |> 
+        pivot_wider(names_from = res, values_from = valor)
+    eval_tbl
+}
+graficar_vc <- function(eval_tbl){
+    error_entrena <- eval_tbl |> filter(tipo == "train") |> pull(mean) |> last()
+    error_val <- eval_tbl |> filter(tipo == "test") |> pull(mean) |> last()
+    sd_error_val <- eval_tbl |> filter(tipo == "test") |> pull(std) |> last()
+    sprintf("Error entrena: %.2f, Error valida: %.2f, ee valida: %.2f", 
+            error_entrena, error_val, sd_error_val) |> print()
+    ggplot(eval_tbl, aes(x = iter, y = mean, ymin = mean - std, ymax = mean + std,
+                     colour = tipo)) +
+        scale_y_log10(breaks = c(0.01, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2)) +
+        geom_line() + geom_ribbon(aes(fill = tipo), alpha = 0.5)
+}
+```
+
+
+
+
+```{r}
+pred <- predict(model, mod_boost_cv)
+lvl = c('N', 'Y')
+pred_label <- lvl[as.numeric(pred>0.5)+1]
+actual_label <- lvl[as.numeric(train$target)+1]
+
+table(pred_label,actual_label)
+
+
+pred_train <- predict(model, xgb_train)
+pred_test <- predict(model, xgb_test)
+
+pred_train_df <- train %>% select(customer_ID, target)
+pred_train_df$predict <- pred_train
+
+pred_test_df <- test %>% select(customer_ID, target)
+pred_test_df$predict <- pred_test
+
+#Guardar resultados
+write.csv(pred_train_df, "Data/pred_train_df.csv", row.names = FALSE)
+write.csv(pred_test_df, "Data/pred_test_df.csv", row.names = FALSE)
+
+pred_label <- lvl[as.numeric(pred>0.5)+1]
+actual_label <- lvl[as.numeric(test$target)+1]
+
+table <- table(pred_label,actual_label)
+table
+table1 <- rbind(table[2,],table[1,])
+
+table2 <- cbind(table1[,2],table1[,1])
+
+confusionMatrix(table2)
+
+confusionMatrix(factor(pred_label,levels=lvl), factor(actual_label,levels=lvl))
+
+pred_df <- as.data.frame(pred)
+
+```
+
+
+### Probando el modelo
+
+
+```{r}
+data_ligth <- read.csv("Data/test_data.csv", nrows = 100000, header = TRUE)
+```
+
+Preprocesmiento
+
+
+```{r}
+all_cols <- names(data_ligth)
+all_cols_df <- as.data.frame(all_cols)
+all_cols_df <- all_cols_df %>% mutate(type="numeric")
+all_cols_df <- all_cols_df %>% mutate(type=if_else(all_cols %in% c("customer_ID", "S_2","D_63","D_64"),"character","numeric"))
+type1 <- c(all_cols_df$type)
+
+```
+
+Data set completo
+
+```{r}
+
+test_df <- read.csv("Data/test_data.csv", header = TRUE, colClasses = type1)
+
+rm(data_ligth)
+
+```
+
+
+
+Data agrupada
+
+```{r}
+test_df <- test_df %>% mutate(Mes = as.double(substr(S_2,6,7)), Anio = as.double(substr(S_2,1,4)))
+test_df <- test_df %>% mutate(Mes1 = if_else(Mes<10, paste0("0",Mes), as.character(Mes))) 
+test_df$Per <- paste0(test_df$Anio, test_df$Mes1)
+test_df <- test_df %>% mutate(Per = as.double(Per))
+
+rm(data_ligth, amex_target, amex_ultimo, amex_ultimo0)
+rm(dent0, dprue0, dtest, dtrain)
+
+train_numerico <- test_df %>% select(-S_2, -B_30, -B_38, -D_114, -D_116, -D_117, -D_120, -D_126, -D_63, -D_64, -D_66, -D_68,
+                                      -D_136, -D_137,-D_138,-R_9,-B_29,-D_106,-D_132,-D_49, D_87,
+                                      -D_88, -D_108, -D_110, -D_111, -B_39, -D_73, -B_42, -D_134, -D_135, -Per,
+                                      -Mes, -Anio, -Mes1) 
+
+glimpse(train_numerico)
+
+train_numerico1 <- train_numerico %>% group_by(customer_ID) %>% summarise(across(P_2:D_145, ~mean(.x, na.rm=TRUE)))
+
+#Eliminamos las dos variables categoricas en las que todos los clientes tenían una sola categoria
+
+train_categorico <- test_df %>% 
+  select(customer_ID, S3, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+             group_by(customer_ID, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+             filter(S3 == max(S3))
+
+rev <- head(train_categorico,50)
+
+train_categorico <- setDT(train_categorico)[, .SD[which.max(S3)], customer_ID]
+
+train_categorico <- rev %>% 
+  select(customer_ID, S3, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+             group_by(customer_ID, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+             filter(S3 == max(S3))
+
+test_f_agg <- left_join(train_numerico1, train_categorico, by =c("customer_ID"))
+test_f_agg <- test_f_agg %>% select(-S3)
+glimpse(test_f_agg)
+
+train_categorico <- test_df %>% select(customer_ID, Per, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+  filter(Per==201910)
+train_categorico <- train_categorico %>%mutate(flag=1) %>% 
+  select(customer_ID, S2, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+  group_by(customer_ID, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+  summarise(flag_sum = sum(flag))
+
+rm(train_numerico)
+
+train_numerico2 <- left_join(train_numerico1, train_categorico, by = c("customer_ID"))
+write.csv(test_f_agg, "Data/test_agrupado_f.csv", row.names = FALSE)
+
+test_df <- test_df %>% mutate(S3 = as.Date(S_2))
+glimpse(test_df)
+
+max(test_df %>% select(S3) %>% head())
+
+```
+
+
+Data ultima transaccion
+
+```{r}
+
+test_df <- test_df %>% mutate(Mes = as.double(substr(S_2,6,7)), Anio = as.double(substr(S_2,1,4)))
+test_df <- test_df %>% mutate(Mes1 = if_else(Mes<10, paste0("0",Mes), as.character(Mes))) 
+test_df$Per <- paste0(test_df$Anio, test_df$Mes1)
+test_df <- test_df %>% mutate(Per = as.double(Per))
+
+test_df <- test_df %>% mutate(S3 = as.Date(S_2))
+test_df1 <- setDT(test_df)[, .SD[which.max(S3)], customer_ID]
+
+test_df2 <- test_df1 %>% select(-S_2, -B_30, -B_38, -D_114, -D_116, -D_117, -D_120, -D_126, -D_63, -D_64, -D_66, -D_68,
+                                      -D_136, -D_137,-D_138,-R_9,-B_29,-D_106,-D_132,-D_49, D_87,
+                                      -D_88, -D_108, -D_110, -D_111, -B_39, -D_73, -B_42, -D_134, -D_135, -Per,
+                                      -Mes, -Anio, -Mes1) 
+
+
+test_df2 <- test_df1 %>% select(-S_2, -D_116, -D_66,
+                                      -D_136, -D_137,-D_138,-R_9,-B_29,-D_106,-D_132,-D_49, D_87,
+                                      -D_88, -D_108, -D_110, -D_111, -B_39, -D_73, -B_42, -D_134, -D_135, -Per,
+                                      -Mes, -Anio, -Mes1, -S3) 
+
+
+names(test_df2)
+
+write.csv(test_df2, "Data/test_ultima_f.csv", row.names = FALSE)
+
+
+
+rm(train_numerico)
+test_df <- test_df %>% mutate(S3 = as.Date(S_2))
+
+
+glimpse(train_numerico)
+
+train_numerico1 <- train_numerico %>% group_by(customer_ID) %>% summarise(across(P_2:D_145, ~mean(.x, na.rm=TRUE)))
+
+#Eliminamos las dos variables categoricas en las que todos los clientes tenían una sola categoria
+
+train_categorico <- test_df %>% 
+  select(customer_ID, S3, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+             group_by(customer_ID, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+             filter(S3 == max(S3))
+
+rev <- head(train_categorico,50)
+
+train_categorico <- setDT(train_categorico)[, .SD[which.max(S3)], customer_ID]
+
+train_categorico <- rev %>% 
+  select(customer_ID, S3, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+             group_by(customer_ID, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+             filter(S3 == max(S3))
+
+test_f_agg <- left_join(train_numerico1, train_categorico, by =c("customer_ID"))
+test_f_agg <- test_f_agg %>% select(-S3)
+glimpse(test_f_agg)
+
+train_categorico <- test_df %>% select(customer_ID, Per, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+  filter(Per==201910)
+train_categorico <- train_categorico %>%mutate(flag=1) %>% 
+  select(customer_ID, S2, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+  group_by(customer_ID, B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68) %>%
+  summarise(flag_sum = sum(flag))
+
+rm(train_numerico)
+
+train_numerico2 <- left_join(train_numerico1, train_categorico, by = c("customer_ID"))
+write.csv(test_f_agg, "Data/test_agrupado_f.csv", row.names = FALSE)
+
+test_df <- test_df %>% mutate(S3 = as.Date(S_2))
+glimpse(test_df)
+
+max(test_df %>% select(S3) %>% head())
+
+
+```
+
+
+### Submmition agrupadp
+
+```{r}
+
+test_df_sub <- read.csv("Data/test_agrupado_f.csv")
+
+```
+
+
+
+```{r}
+#Example
+
+test_df_sub <- test_df_sub %>% mutate(B_30 = as.character(B_30),
+                                        B_38 = as.character(B_38), 
+                                        D_114 = as.character(D_114),
+                                        D_117 = as.character(D_117),
+                                        D_120 = as.character(D_120),
+                                        D_126 = as.character(D_126),
+                                        D_63 = as.character(D_63),
+                                        D_64 = as.character(D_64), 
+                                        D_68 = as.character(D_68))
+
+glimpse(test_df_sub)
+test_df_sub <- test_df_sub %>% mutate(target=1)
+
+```
+
+
+```{r}
+recipe_test <- recipe(target ~ ., data=test_df_sub) %>%
+  step_dummy(B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68)
+
+
+test_df_sub_m <- recipe_test %>% prep() %>% juice()
+test_df_sub_m <- as.data.frame(test_df_sub_m)
+test_df_sub_m$target
+test_df_sub_m <- test_df_sub_m %>% select(-target)
+test_df_sub_m <- test_df_sub_m %>% select(-customer_ID)
+
+
+```
+
+
+
+
+```{r}
+
+dim(train_x)
+test_f = data.matrix(test_df_sub_m)
+dim(test_f)
+
+pred <- predict(model, test_f)
+
+submmition <- test_df_sub %>% select(customer_ID)
+submmition$prediction <- pred
+
+write.csv(submmition, "Data/submission.csv", row.names = FALSE)
+
+
+```
+
+
+
+### Submmitin modelo individual
+
+
+```{r}
+
+library(xgboost)
+library(caret)
+
+```
+
+
+Datos
+
+```{r}
+
+train_df_ind <- read.csv("Data/train_ultimo_per.csv")
+
+```
+
+
+Etiquetas
+
+```{r}
+
+train_label <- read.csv("Data/train_labels.csv")
+
+```
+
+
+Cruce etiquetas
+
+```{r}
+
+train_df_ind <- left_join(train_df_ind, train_label, by = c("customer_ID"))
+
+```
+
+
+Modelo
+
+```{r}
+#Example
+
+train_df_ind <- train_df_ind %>% mutate(B_30 = as.character(B_30),
+                                        B_38 = as.character(B_38), 
+                                        D_114 = as.character(D_114),
+                                        D_117 = as.character(D_117),
+                                        D_120 = as.character(D_120),
+                                        D_126 = as.character(D_126),
+                                        D_63 = as.character(D_63),
+                                        D_64 = as.character(D_64), 
+                                        D_68 = as.character(D_68))
+
+```
+
+
+```{r}
+recipe_train <- recipe(target ~ ., data=train_df_ind) %>%
+  step_dummy(B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68)
+
+
+train_df_m <- recipe_train %>% prep() %>% juice()
+train_df_m <- as.data.frame(train_df_m)
+
+```
+
+
+
+```{r}
+
+parts = createDataPartition(train_df_m$target, p = .8, list = F)
+train = train_df_m[parts, ]
+test = train_df_m[-parts, ]
+
+train1 <- train %>% select(-customer_ID)
+test1 <- test %>% select(-customer_ID)
+
+#train1 <- train %>% select(-target)
+#glimpse(train)
+#train %>% select(161)
+
+train_x = data.matrix(train1[, -161])
+train_y = train1[,161]
+#dim(train_y)
+
+#rev <- train[, -161]
+
+test_x = data.matrix(test1[, -161])
+test_y = test1[, 161]
+
+
+xgb_train = xgb.DMatrix(data = train_x, label = train_y)
+xgb_test = xgb.DMatrix(data = test_x, label = test_y)
+
+
+watchlist = list(train=xgb_train, test=xgb_test)
+
+num_vars <- dim(train_df_m)[2]
+
+param <- list(objective = "binary:logistic", eval_metric = "logloss", eta=0.05, colsample_bynode = 0.05)
+
+model = xgb.train(param, data = xgb_train, max.depth = 4, watchlist=watchlist, nrounds = 2000)
+
+
+
+
+lvl = c('N', 'Y')
+
+
+pred <- predict(model, xgb_test)
+
+pred_label <- lvl[as.numeric(pred>0.5)+1]
+actual_label <- lvl[as.numeric(test$target)+1]
+
+table <- table(pred_label,actual_label)
+table
+
+
+
+```
+
+
+
+
+
+```{r}
+
+test_df_sub <- read.csv("Data/test_ultima_f.csv")
+
+```
+
+
+
+```{r}
+#Example
+
+test_df_sub <- test_df_sub %>% mutate(B_30 = as.character(B_30),
+                                        B_38 = as.character(B_38), 
+                                        D_114 = as.character(D_114),
+                                        D_117 = as.character(D_117),
+                                        D_120 = as.character(D_120),
+                                        D_126 = as.character(D_126),
+                                        D_63 = as.character(D_63),
+                                        D_64 = as.character(D_64), 
+                                        D_68 = as.character(D_68))
+
+#glimpse(test_df_sub)
+test_df_sub <- test_df_sub %>% mutate(target=1)
+
+```
+
+
+```{r}
+recipe_test <- recipe(target ~ ., data=test_df_sub) %>%
+  step_dummy(B_30, B_38, D_114, D_117, D_120, D_126, D_63, D_64, D_68)
+
+
+test_df_sub_m <- recipe_test %>% prep() %>% juice()
+test_df_sub_m <- as.data.frame(test_df_sub_m)
+test_df_sub_m$target
+test_df_sub_m <- test_df_sub_m %>% select(-target)
+test_df_sub_m <- test_df_sub_m %>% select(-customer_ID)
+
+
+```
+
+
+
+
+```{r}
+
+dim(train_x)
+test_f = data.matrix(test_df_sub_m)
+dim(test_f)
+
+pred <- predict(model, test_f)
+
+submmition <- test_df_sub %>% select(customer_ID)
+submmition$prediction <- pred
+
+write.csv(submmition, "Data/submission_ultimo_mes.csv", row.names = FALSE)
+
+
+```
+
+
+
