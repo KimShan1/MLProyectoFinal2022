@@ -9,5 +9,5 @@
 Detalles del proyecto:
 * [Ruta de datos](https://drive.google.com/drive/folders/1DYzqs2uZ4sCKDH7himPI0C75nrtUXfJv)
 * La carpeta "Código" contiene el código utiizado para este proyecto
-* Se agrega reporte y presentación
+* Se agrega reporte y presentación: https://view.genial.ly/6397d961a09ed10019e94228/presentation-ml-ppt
 
