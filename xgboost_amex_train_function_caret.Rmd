@@ -1,0 +1,76 @@
+---
+title: "Trabajo final para aprendizaje de máquina"
+output: html_document
+date: "2022-12-01"
+---
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(recipes)
+library(plyr)
+library(dplyr)
+library(rsample)
+library(feather)
+library(arrow)
+library(patchwork)
+library(yardstick)
+library(parsnip)
+library(xgboost)
+library(purrr)
+library(caret)
+library(tidyr)
+library(lubridate)
+library(ggforce)
+```
+# Trabajo final para la materia Aprendizaje de Máquina
+
+Este trabajo busca crear un modelo para predecir la probabilidad de incumplimiento de un pago por parte de un cliente de American Express. 
+
+
+# Base de datos agregada
+```{r}
+amex_ultimo<-read_csv("~/Downloads/train_ultimo_per.csv")
+amex_target<-read_csv("~/Downloads/amex-default-prediction/train_labels.csv")
+amex_ultimo0<-amex_ultimo %>% left_join(amex_target) %>% select(-customer_ID,-D_87) %>% mutate(B_30=as.
+                                                                                               tor(B_30), B_38=as.factor(B_38), D_114=as.factor(D_114), D_117=as.factor(D_117), D_120=as.factor(D_120), D_126=as.factor(D_126),  D_68=as.factor(D_68))
+
+dv<-dummyVars("target~.",amex_ultimo0)
+onehot<-data.frame(predict(dv,amex_ultimo0)) %>% cbind(target=amex_target$target)
+```
+
+Dividimos datos en entrenamiento y validación. Dado que tenemos un considerable número de observaciones, el set de entrenamiento puede tener una proporción considerable sin perjuicio al set de prueba. Cabe señalar que para la funciónxgboost::xgb.train se pedía una matrix con formato xgb.DMatrix, lo cual a su vez requería separar la variable objetivo de las explicativas una vez realizada la división de sets de entrenamiento y validación.
+
+```{r}
+set.seed(10000)
+split1<-initial_split(onehot,prop=0.85)
+entrena0<-training(split1) %>%mutate(target=as.factor(target))
+prueba0<-testing(split1) %>%mutate(target=as.factor(target))
+
+```
+
+
+# Planteamiento del modelo XGBOOST
+
+Debido a que se trata de un problema de clasificación, uno de los modelos que puede utilizarse para predecir la variable objetivo es XGBOOST, consiste en una mejora a los modelos de decisión de árboles binomiales, con la adición de que los residuos entre la última predicción y el valor real se convierten en el objetivo de la predicción siguiente.
+
+```{r}
+
+#grid1<-expand.grid(n.trees=seq(3,11,2),interaction.depth=seq(3,11,2),
+ #                  shrinkage = 10**seq(-5,-1,1),n.minobsinnode=seq(3,11,2)) 
+grid1<-expand.grid(nrounds=seq(30,210,30),max_depth =seq(3,15,2),                             eta=10**seq(-4,-1,1),gamma=10**seq(-4,-1,1),
+                   colsample_bytree=0.5,
+                   min_child_weight=1,subsample=0.5)
+
+#Grid de prueba para afinar la función "boosfit1"
+#grid_chico<-expand.grid(n.trees=3,interaction.depth=3, #colsample_bytree=1,
+ #                       shrinkage = 0.1,n.minobsinnode=3)#n.trees=5,
+              #min_child_weight=0.1,subsample=0.5)#nrounds=2,max_depth =2,eta=0.1, gamma=0.1, 
+boostfit1<-train(target~.,data=entrena0,method="xgbTree",#family="binomial",
+                 tuneGrid=grid1,metric="Accuracy",
+                 maximize=T,na.action=na.pass,
+                 verbose=FALSE,tuneLength=1)#puede ser tmb na.exclude
+#se trató que maximizar sens pero la función no reconocía la métrica
+#el tuneLength debería ser el número de niveles del target (osea 2) pero con 2 me arrojaba el error de que 
+predic1<-predict(boostfit1$finalModel,newdata=prue0x)
+#matriz_prueba<-data.frame(truth=prueba0$target,pred=predic1)
+```
