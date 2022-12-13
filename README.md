@@ -1,6 +1,6 @@
 # MLProyectoFinal2022
 Proyecto ITAM Machine Learning
-Proyecto AMEX para la materia de Machine Learning 
+Proyecto final de la competencia en Kaggle de AMEX
 
 
 
